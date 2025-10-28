@@ -738,6 +738,24 @@ def sdf2mjcf(
             **kwargs
         )
 
+    # Sites
+    if use_site:
+        if animat_options is not None:
+            for link in animat_options.morphology.links:
+                if 'sites' in link:
+                    for link_site in link.sites:
+                        site = mjcf_map['links'][link.name].add(
+                            'site',
+                            type=link_site.shape,
+                            name=link_site.name,
+                            group=6,
+                            pos=link_site.pos,
+                            quat=link_site.quat,
+                            size=[link_site.size*units.meters]*3,
+                            rgba=link_site.rgba
+                        )
+                        mjcf_map['sites'][link_site.name] = site
+
     # Keyframes
     if animat_options is not None:
         joint_options = animat_options.morphology.joints

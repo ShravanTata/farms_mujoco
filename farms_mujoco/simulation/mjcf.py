@@ -15,6 +15,7 @@ from dm_control import mjcf
 
 from farms_core import pylog
 from farms_core.model.control import ControlType
+from farms_core.model.options import TendonType
 from farms_core.units import SimulationUnitScaling
 from farms_core.simulation.options import SimulationOptions
 from farms_core.array.types import (
@@ -883,19 +884,48 @@ def sdf2mjcf(
                     mjcf_map['actuators'][name].forcelimited = True
                     mjcf_map['actuators'][name].forcerange = torque_limits
         assert mjcf_map['actuators'], mjcf_map['actuators']
+
+        # Tendons
+        for tendon in animat_options.morphology.tendons:
+            # Add tendon
+            mjcf_map['tendons'][tendon.name] = mjcf_model.tendon.add(
+                tendon.type,
+                name=tendon.name,
+                group=0,
+            )
+            match tendon.type:
+                case TendonType.FIXED.value:
+                    for joint_coeff in tendon.joints:
+                        mjcf_map['tendons'][tendon.name].add(
+                            'joint',
+                            joint=joint_coeff.joint,
+                            coef=joint_coeff.coeff
+                        )
+                case TendonType.SPATIAL.value:
+                    # Update visuals
+                    mjcf_map['tendons'][tendon.name].width = 0.03*units.meters
+                    mjcf_map['tendons'][tendon.name].rgba = [0.5, 0.5, 0.5, 1]
+                    for pindex, pathpoint in enumerate(tendon.path):
+                        # Add sites
+                        body = mjcf_model.worldbody.find('body', pathpoint.link)
+                        site_name = f'{tendon.name}_P{pindex}'
+                        body.add(
+                            'site',
+                            name=site_name,
+                            pos=[p*units.meters for p in pathpoint.pos],
+                            group=0,
+                            size=[5e-4*units.meters]*3,
+                            rgba=[0.0, 1, 0, 0.5]
+                        )
+                        # Attach site to tendon
+                        mjcf_map['tendons'][tendon.name].add('site', site=site_name)
+
         # Muscles
         if use_muscles:
             # Add sites from muscle config file
             for muscle in animat_options.control.hill_muscles:
                 # Add tendon
                 tendon_name = f'{muscle.name}'
-                mjcf_map['tendons'][tendon_name] = mjcf_model.tendon.add(
-                    "spatial",
-                    name=tendon_name,
-                    group=0,
-                    width=1e-3,
-                    rgba=[0.0, 0.0, 1.0, 1],
-                )
                 # Add actuator
                 muscle_name = f'{muscle.name}'
                 prms = [
@@ -945,25 +975,6 @@ def sdf2mjcf(
                         muscle['type_Ib_kF'],
                     ],
                 )
-                # Define waypoints
-                for pindex, waypoint in enumerate(muscle['waypoints']):
-                    body_name = waypoint[0]
-                    position = [pos*units.meters for pos in waypoint[1]]
-                    # Add sites
-                    body = mjcf_model.worldbody.find('body', body_name)
-                    site_name = f'{muscle_name}_P{pindex}'
-                    body.add(
-                        'site',
-                        name=site_name,
-                        pos=position,
-                        group=ControlType.MUSCLE,
-                        size=[5e-4*units.meters]*3,
-                        rgba=[0.0, 1, 0, 0.5]
-                    )
-                    # Attach site to tendon
-                    mjcf_map['tendons'][tendon_name].add(
-                        'site', site=site_name
-                    )
 
     # Sensors
     if use_sensors:

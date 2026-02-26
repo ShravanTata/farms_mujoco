@@ -4,12 +4,12 @@ import numpy as np
 cimport numpy as np
 
 try:
-    from farms_muscle import rigid_tendon as rt
+    from farms_muscle cimport rigid_tendon as rt
 except:
     print("farms_muscle not installed")
 from mujoco import mj_contactForce
 
-from libc.math cimport abs, fmax, sqrt
+from libc.math cimport fabs, fmax, pow, sqrt
 
 
 cdef inline double norm3d(double[3] vector):
@@ -194,7 +194,7 @@ cpdef cymusclesensors2data(
     object physics,
     unsigned int iteration,
     MusclesArrayCy data,
-    np.ndarray musclesensor2data,
+    np.int64_t[:, :] musclesensor2data,
     double meters,
     double velocity,
     double newtons,
@@ -202,20 +202,32 @@ cpdef cymusclesensors2data(
     """ Compute and update muscle states, spindle and golgi tendon
     feedbacks """
     cdef DTYPEv3 cdata = data.array
-    cdef object model_ptr = physics.model.ptr
-    cdef object data_ptr = physics.data.ptr
+
     cdef unsigned int n_muscles = len(data.names)
     cdef unsigned int mindex
-    cdef int[7] objids
+
+    cdef double[:] ctrl = physics.data.ctrl[:]
+    cdef double[:] act = physics.data.act[:]
+    cdef double[:] l_mtu = physics.data.actuator_length[:]
+    cdef double[:] v_mtu = physics.data.actuator_velocity[:]
+    cdef double[:] force = physics.data.actuator_force[:]
+
+    cdef double[:, :] m_gainrpm = physics.model.actuator_gainprm
+    cdef double[:, :] m_userprm = physics.model.actuator_user
+
     for mindex in range(n_muscles):
-        objids = musclesensor2data[mindex]
         cymusclesensor2data(
             iteration=iteration,
             index=mindex,
-            objids=objids,
-            model_ptr=model_ptr,
-            data_ptr=data_ptr,
+            objids=musclesensor2data[mindex],
             cdata=cdata,
+            d_ctrl=ctrl,
+            d_act=act,
+            d_l_mtu=l_mtu,
+            d_v_mtu=v_mtu,
+            d_force=force,
+            m_gainprm=m_gainrpm,
+            m_userprm=m_userprm,
             imeters=1/meters,
             ivelocity=1/velocity,
             inewtons=1/newtons,
@@ -225,10 +237,15 @@ cpdef cymusclesensors2data(
 cdef void cymusclesensor2data(
     unsigned int iteration,
     unsigned int index,
-    int [7] objids,
-    object model_ptr,
-    object data_ptr,
+    np.int64_t[:] objids,
     DTYPEv3 cdata,
+    double[:] d_ctrl,
+    double[:] d_act,
+    double[:] d_l_mtu,
+    double[:] d_v_mtu,
+    double[:] d_force,
+    double[:, :] m_gainprm,
+    double[:, :] m_userprm,
     double imeters,
     double ivelocity,
     double inewtons,
@@ -244,13 +261,13 @@ cdef void cymusclesensor2data(
     cdef double l_opt, l_slack, v_max, f_max, alpha_opt
     # muscle states
     cdef double alpha, l_ce, v_ce
-    cdef double excitation = data_ptr.ctrl[objids[0]]
-    cdef double act = data_ptr.act[objids[1]]
-    cdef double l_mtu = data_ptr.actuator_length[objids[2]]*imeters
-    cdef double v_mtu = data_ptr.actuator_velocity[objids[3]]*ivelocity
-    cdef double force = data_ptr.actuator_force[objids[4]]*inewtons
+    cdef double excitation = d_ctrl[objids[0]]
+    cdef double act = d_act[objids[1]]
+    cdef double l_mtu = d_l_mtu[objids[2]]*imeters
+    cdef double v_mtu = d_v_mtu[objids[3]]*ivelocity
+    cdef double force = d_force[objids[4]]*inewtons
     # muscle params
-    cdef double[:] gainprm = model_ptr.actuator_gainprm[objids[5]]
+    cdef double[:] gainprm = m_gainprm[objids[5]]
     f_max = gainprm[0]*inewtons
     l_opt = gainprm[1]*imeters
     l_slack = gainprm[2]*imeters
@@ -275,23 +292,33 @@ cdef void cymusclesensor2data(
         l_ce_norm, v_ce_norm, alpha
     )
     # muscle spindles and golgi tendon feedbacks
+    cdef int user_idx = objids[6]
     # IA
-    Ia_kv , Ia_pv , Ia_k_dI , Ia_k_nI , Ia_const_I, type_I_l_ce_th = (
-        model_ptr.actuator_user[objids[6]][:6]
-    )
+    Ia_kv = m_userprm[user_idx][0]
+    Ia_pv = m_userprm[user_idx][1]
+    Ia_k_dI = m_userprm[user_idx][2]
+    Ia_k_nI = m_userprm[user_idx][3]
+    Ia_const_I = m_userprm[user_idx][4]
+    type_I_l_ce_th = m_userprm[user_idx][5]
+
     cdef double v_ce_norm_sign = 1.0 if v_ce_norm >= 0.0 else -1.0
     cdata[iteration, index, MUSCLE_IA_FEEDBACK] = fmax(
-        0.0, Ia_kv*v_ce_norm_sign*abs(v_ce_norm*v_max)**Ia_pv + Ia_k_dI*(l_ce_norm - type_I_l_ce_th) + Ia_k_nI*act
+        0.0,
+        Ia_kv*v_ce_norm_sign*pow(fabs(v_ce_norm*v_max), Ia_pv) +
+        Ia_k_dI*(l_ce_norm - type_I_l_ce_th) +
+        Ia_k_nI*act
     )
     # II
-    II_k_dII, II_k_nII, II_const_II, type_II_l_ce_th = (
-        model_ptr.actuator_user[objids[6]][6:10]
-    )
+    II_k_dII = m_userprm[user_idx][6]
+    II_k_nII = m_userprm[user_idx][7]
+    II_const_II = m_userprm[user_idx][8]
+    type_II_l_ce_th = m_userprm[user_idx][9]
+
     cdata[iteration, index, MUSCLE_II_FEEDBACK] = fmax(
         0.0, II_k_dII*(l_ce_norm - type_II_l_ce_th) + II_k_nII*act
     )
     # IB
-    Ib_kF = model_ptr.actuator_user[objids[6]][10]
+    Ib_kF = m_userprm[user_idx][10]
     # negative sign here is because muscles produces pulling force. Which is modeled to
     # be negative in the convention
     cdata[iteration, index, MUSCLE_IB_FEEDBACK] = max(
